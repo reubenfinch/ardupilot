@@ -26,6 +26,7 @@ void Location::zero(void)
     memset(this, 0, sizeof(*this));
 }
 
+// Construct location using position (NEU) from ekf_origin for the given altitude frame
 Location::Location(int32_t latitude, int32_t longitude, int32_t alt_in_cm, AltFrame frame)
 {
     zero();
@@ -34,10 +35,10 @@ Location::Location(int32_t latitude, int32_t longitude, int32_t alt_in_cm, AltFr
     set_alt_cm(alt_in_cm, frame);
 }
 
-Location::Location(const Vector3f &ekf_offset_neu)
+Location::Location(const Vector3f &ekf_offset_neu, AltFrame frame)
 {
     // store alt and alt frame
-    set_alt_cm(ekf_offset_neu.z, AltFrame::ABOVE_ORIGIN);
+    set_alt_cm(ekf_offset_neu.z, frame);
 
     // calculate lat, lon
     Location ekf_origin;
@@ -102,6 +103,11 @@ Location::AltFrame Location::get_alt_frame() const
 /// get altitude in desired frame
 bool Location::get_alt_cm(AltFrame desired_frame, int32_t &ret_alt_cm) const
 {
+#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
+    if (!initialised()) {
+        AP_HAL::panic("Should not be called on invalid location");
+    }
+#endif
     Location::AltFrame frame = get_alt_frame();
 
     // shortcut if desired and underlying frame are the same
@@ -240,13 +246,10 @@ Vector3f Location::get_distance_NED(const Location &loc2) const
 // extrapolate latitude/longitude given distances (in meters) north and east
 void Location::offset(float ofs_north, float ofs_east)
 {
-    // use is_equal() because is_zero() is a local class conflict and is_zero() in AP_Math does not belong to a class
-    if (!is_equal(ofs_north, 0.0f) || !is_equal(ofs_east, 0.0f)) {
-        int32_t dlat = ofs_north * LOCATION_SCALING_FACTOR_INV;
-        int32_t dlng = (ofs_east * LOCATION_SCALING_FACTOR_INV) / longitude_scale();
-        lat += dlat;
-        lng += dlng;
-    }
+    const int32_t dlat = ofs_north * LOCATION_SCALING_FACTOR_INV;
+    const int32_t dlng = (ofs_east * LOCATION_SCALING_FACTOR_INV) / longitude_scale();
+    lat += dlat;
+    lng += dlng;
 }
 
 /*
@@ -263,10 +266,21 @@ void Location::offset_bearing(float bearing, float distance)
     offset(ofs_north, ofs_east);
 }
 
+// extrapolate latitude/longitude given bearing, pitch and distance
+void Location::offset_bearing_and_pitch(float bearing, float pitch, float distance)
+{
+    const float ofs_north =  cosf(radians(pitch)) * cosf(radians(bearing)) * distance;
+    const float ofs_east  =  cosf(radians(pitch)) * sinf(radians(bearing)) * distance;
+    offset(ofs_north, ofs_east);
+    const int32_t dalt =  sinf(radians(pitch)) * distance *100.0f;
+    alt += dalt; 
+}
+
+
 float Location::longitude_scale() const
 {
     float scale = cosf(lat * (1.0e-7f * DEG_TO_RAD));
-    return constrain_float(scale, 0.01f, 1.0f);
+    return MAX(scale, 0.01f);
 }
 
 /*

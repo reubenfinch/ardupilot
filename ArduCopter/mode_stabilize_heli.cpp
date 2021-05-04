@@ -6,7 +6,7 @@
  */
 
 // stabilize_init - initialise stabilize controller
-bool Copter::ModeStabilize_Heli::init(bool ignore_checks)
+bool ModeStabilize_Heli::init(bool ignore_checks)
 {
     // set stab collective true to use stabilize scaled collective pitch range
     copter.input_manager.set_use_stab_col(true);
@@ -16,7 +16,7 @@ bool Copter::ModeStabilize_Heli::init(bool ignore_checks)
 
 // stabilize_run - runs the main stabilize controller
 // should be called at 100hz or more
-void Copter::ModeStabilize_Heli::run()
+void ModeStabilize_Heli::run()
 {
     float target_roll, target_pitch;
     float target_yaw_rate;
@@ -54,17 +54,18 @@ void Copter::ModeStabilize_Heli::run()
         attitude_control->reset_rate_controller_I_terms();
         break;
     case AP_Motors::SpoolState::GROUND_IDLE:
-        // Landed
-        if (motors->init_targets_on_arming()) {
+        // If aircraft is landed, set target heading to current and reset the integrator
+        // Otherwise motors could be at ground idle for practice autorotation
+        if ((motors->init_targets_on_arming() && motors->using_leaky_integrator()) || (copter.ap.land_complete && !motors->using_leaky_integrator())) {
             attitude_control->set_yaw_target_to_current_heading();
-            attitude_control->reset_rate_controller_I_terms();
+            attitude_control->reset_rate_controller_I_terms_smoothly();
         }
         break;
     case AP_Motors::SpoolState::THROTTLE_UNLIMITED:
-        // clear landing flag above zero throttle
-        if (!motors->limit.throttle_lower) {
-            set_land_complete(false);
+        if (copter.ap.land_complete && !motors->using_leaky_integrator()) {
+            attitude_control->reset_rate_controller_I_terms_smoothly();
         }
+        break;
     case AP_Motors::SpoolState::SPOOLING_UP:
     case AP_Motors::SpoolState::SPOOLING_DOWN:
         // do nothing

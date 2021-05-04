@@ -14,17 +14,23 @@
  */
 
 // initialise follow mode
-bool Copter::ModeFollow::init(const bool ignore_checks)
+bool ModeFollow::init(const bool ignore_checks)
 {
     if (!g2.follow.enabled()) {
         gcs().send_text(MAV_SEVERITY_WARNING, "Set FOLL_ENABLE = 1");
         return false;
     }
     // re-use guided mode
-    return Copter::ModeGuided::init(ignore_checks);
+    return ModeGuided::init(ignore_checks);
 }
 
-void Copter::ModeFollow::run()
+// perform cleanup required when leaving follow mode
+void ModeFollow::exit()
+{
+    g2.follow.clear_offsets_if_required();
+}
+
+void ModeFollow::run()
 {
     // if not armed set throttle to zero and exit immediately
     if (is_disarmed_or_landed()) {
@@ -87,11 +93,7 @@ void Copter::ModeFollow::run()
 
         // slow down horizontally as we approach target (use 1/2 of maximum deceleration for gentle slow down)
         const float dist_to_target_xy = Vector2f(dist_vec_offs_neu.x, dist_vec_offs_neu.y).length();
-        copter.avoid.limit_velocity(pos_control->get_pos_xy_p().kP().get(), pos_control->get_max_accel_xy() * 0.5f, desired_velocity_xy_cms, dir_to_target_xy, dist_to_target_xy, copter.G_Dt);
-
-        // limit the horizontal velocity to prevent fence violations
-        copter.avoid.adjust_velocity(pos_control->get_pos_xy_p().kP().get(), pos_control->get_max_accel_xy(), desired_velocity_xy_cms, G_Dt);
-
+        copter.avoid.limit_velocity_2D(pos_control->get_pos_xy_p().kP().get(), pos_control->get_max_accel_xy() * 0.5f, desired_velocity_xy_cms, dir_to_target_xy, dist_to_target_xy, copter.G_Dt);
         // copy horizontal velocity limits back to 3d vector
         desired_velocity_neu_cms.x = desired_velocity_xy_cms.x;
         desired_velocity_neu_cms.y = desired_velocity_xy_cms.y;
@@ -100,8 +102,8 @@ void Copter::ModeFollow::run()
         const float des_vel_z_max = copter.avoid.get_max_speed(pos_control->get_pos_z_p().kP().get(), pos_control->get_max_accel_z() * 0.5f, fabsf(dist_vec_offs_neu.z), copter.G_Dt);
         desired_velocity_neu_cms.z = constrain_float(desired_velocity_neu_cms.z, -des_vel_z_max, des_vel_z_max);
 
-        // get avoidance adjusted climb rate
-        desired_velocity_neu_cms.z = get_avoidance_adjusted_climbrate(desired_velocity_neu_cms.z);
+        // limit the velocity for obstacle/fence avoidance
+        copter.avoid.adjust_velocity(desired_velocity_neu_cms, pos_control->get_pos_xy_p().kP().get(), pos_control->get_max_accel_xy(), pos_control->get_pos_z_p().kP().get(), pos_control->get_max_accel_z(), G_Dt);
 
         // calculate vehicle heading
         switch (g2.follow.get_yaw_behave()) {
@@ -148,17 +150,17 @@ void Copter::ModeFollow::run()
         last_log_ms = now;
     }
     // re-use guided mode's velocity controller (takes NEU)
-    Copter::ModeGuided::set_velocity(desired_velocity_neu_cms, use_yaw, yaw_cd, false, 0.0f, false, log_request);
+    ModeGuided::set_velocity(desired_velocity_neu_cms, use_yaw, yaw_cd, false, 0.0f, false, log_request);
 
-    Copter::ModeGuided::run();
+    ModeGuided::run();
 }
 
-uint32_t Copter::ModeFollow::wp_distance() const
+uint32_t ModeFollow::wp_distance() const
 {
     return g2.follow.get_distance_to_target() * 100;
 }
 
-int32_t Copter::ModeFollow::wp_bearing() const
+int32_t ModeFollow::wp_bearing() const
 {
     return g2.follow.get_bearing_to_target() * 100;
 }
@@ -166,7 +168,7 @@ int32_t Copter::ModeFollow::wp_bearing() const
 /*
   get target position for mavlink reporting
  */
-bool Copter::ModeFollow::get_wp(Location &loc)
+bool ModeFollow::get_wp(Location &loc)
 {
     float dist = g2.follow.get_distance_to_target();
     float bearing = g2.follow.get_bearing_to_target();

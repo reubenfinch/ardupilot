@@ -37,7 +37,7 @@ AP_BoardLED board_led;
 // create fake gcs object
 GCS_Dummy _gcs;
 
-const AP_Param::GroupInfo GCS_MAVLINK::var_info[] = {
+const AP_Param::GroupInfo GCS_MAVLINK_Parameters::var_info[] = {
         AP_GROUPEND
 };
 
@@ -65,6 +65,7 @@ void setup()
 /*
   print a int32_t lat/long in decimal degrees
  */
+void print_latlon(AP_HAL::BetterStream *s, int32_t lat_or_lon);
 void print_latlon(AP_HAL::BetterStream *s, int32_t lat_or_lon)
 {
     int32_t dec_portion, frac_portion;
@@ -110,7 +111,7 @@ void loop()
         hal.console->printf(" Alt: %.2fm GSP: %.2fm/s CoG: %d SAT: %d TIM: %u/%lu STATUS: %u\n",
                             (double)(loc.alt * 0.01f),
                             (double)gps.ground_speed(),
-                            (int)gps.ground_course_cd() / 100,
+                            (int)gps.ground_course(),
                             gps.num_sats(),
                             gps.time_week(),
                             (long unsigned int)gps.time_week_ms(),
