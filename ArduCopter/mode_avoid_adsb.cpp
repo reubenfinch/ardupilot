@@ -1,5 +1,7 @@
 #include "Copter.h"
 
+#if AP_ADSB_AVOIDANCE_ENABLED
+
 /*
  * control_avoid.cpp - init and run calls for AP_Avoidance's AVOID flight mode
  *
@@ -10,29 +12,31 @@
  */
 
 // initialise avoid_adsb controller
-bool Copter::ModeAvoidADSB::init(const bool ignore_checks)
+bool ModeAvoidADSB::init(const bool ignore_checks)
 {
     // re-use guided mode
-    return Copter::ModeGuided::init(ignore_checks);
+    return ModeGuided::init(ignore_checks);
 }
 
-bool Copter::ModeAvoidADSB::set_velocity(const Vector3f& velocity_neu)
+bool ModeAvoidADSB::set_velocity_NEU_ms(const Vector3f& velocity_neu_ms)
 {
     // check flight mode
-    if (copter.control_mode != AVOID_ADSB) {
+    if (copter.flightmode->mode_number() != Mode::Number::AVOID_ADSB) {
         return false;
     }
 
     // re-use guided mode's velocity controller
-    Copter::ModeGuided::set_velocity(velocity_neu);
+    ModeGuided::set_vel_NED_ms(velocity_neu_ms);
     return true;
 }
 
 // runs the AVOID_ADSB controller
-void Copter::ModeAvoidADSB::run()
+void ModeAvoidADSB::run()
 {
     // re-use guided mode's velocity controller
     // Note: this is safe from interference from GCSs and companion computer's whose guided mode
     //       position and velocity requests will be ignored while the vehicle is not in guided mode
-    Copter::ModeGuided::run();
+    ModeGuided::run();
 }
+
+#endif  // AP_ADSB_AVOIDANCE_ENABLED

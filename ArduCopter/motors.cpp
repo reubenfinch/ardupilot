@@ -2,108 +2,36 @@
 
 #define ARM_DELAY               20  // called at 10hz so 2 seconds
 #define DISARM_DELAY            20  // called at 10hz so 2 seconds
-#define AUTO_TRIM_DELAY         100 // called at 10hz so 10 seconds
 #define LOST_VEHICLE_DELAY      10  // called at 10hz so 1 second
 
 static uint32_t auto_disarm_begin;
 
-// arm_motors_check - checks for pilot input to arm or disarm the copter
-// called at 10hz
-void Copter::arm_motors_check()
-{
-    static int16_t arming_counter;
-
-    // check if arming/disarm using rudder is allowed
-    AP_Arming::RudderArming arming_rudder = arming.get_rudder_arming_type();
-    if (arming_rudder == AP_Arming::RudderArming::IS_DISABLED) {
-        return;
-    }
-
-#if TOY_MODE_ENABLED == ENABLED
-    if (g2.toy_mode.enabled()) {
-        // not armed with sticks in toy mode
-        return;
-    }
-#endif
-
-    // ensure throttle is down
-    if (channel_throttle->get_control_in() > 0) {
-        arming_counter = 0;
-        return;
-    }
-
-    int16_t yaw_in = channel_yaw->get_control_in();
-
-    // full right
-    if (yaw_in > 4000) {
-
-        // increase the arming counter to a maximum of 1 beyond the auto trim counter
-        if (arming_counter <= AUTO_TRIM_DELAY) {
-            arming_counter++;
-        }
-
-        // arm the motors and configure for flight
-        if (arming_counter == ARM_DELAY && !motors->armed()) {
-            // reset arming counter if arming fail
-            if (!init_arm_motors(AP_Arming::Method::RUDDER)) {
-                arming_counter = 0;
-            }
-        }
-
-        // arm the motors and configure for flight
-        if (arming_counter == AUTO_TRIM_DELAY && motors->armed() && control_mode == STABILIZE) {
-            auto_trim_counter = 250;
-            // ensure auto-disarm doesn't trigger immediately
-            auto_disarm_begin = millis();
-        }
-
-    // full left and rudder disarming is enabled
-    } else if ((yaw_in < -4000) && (arming_rudder == AP_Arming::RudderArming::ARMDISARM)) {
-        if (!flightmode->has_manual_throttle() && !ap.land_complete) {
-            arming_counter = 0;
-            return;
-        }
-
-        // increase the counter to a maximum of 1 beyond the disarm delay
-        if (arming_counter <= DISARM_DELAY) {
-            arming_counter++;
-        }
-
-        // disarm the motors
-        if (arming_counter == DISARM_DELAY && motors->armed()) {
-            init_disarm_motors();
-        }
-
-    // Yaw is centered so reset arming counter
-    } else {
-        arming_counter = 0;
-    }
-}
-
-// auto_disarm_check - disarms the copter if it has been sitting on the ground in manual mode with throttle low for at least 15 seconds
+// auto_disarm_check - disarm after a configurable delay if landed and throttle is low,
+// unless takeoff/spool-up is being requested or auto-disarm is disabled.
 void Copter::auto_disarm_check()
 {
     uint32_t tnow_ms = millis();
-    uint32_t disarm_delay_ms = 1000*constrain_int16(g.disarm_delay, 0, 127);
+    uint32_t disarm_delay_ms = 1000*constrain_int16(g.disarm_delay, 0, INT8_MAX);
 
-    // exit immediately if we are already disarmed, or if auto
-    // disarming is disabled
-    if (!motors->armed() || disarm_delay_ms == 0 || control_mode == THROW) {
+    // Reset timer and exit if disarmed, auto-disarm disabled, or in THROW mode.
+    if (!motors->armed() || disarm_delay_ms == 0 || flightmode->mode_number() == Mode::Number::THROW) {
         auto_disarm_begin = tnow_ms;
         return;
     }
 
-    // if the rotor is still spinning, don't initiate auto disarm
-    if (motors->get_spool_state() > AP_Motors::SpoolState::GROUND_IDLE) {
+    // If takeoff/spool-up is being requested (desired spool state beyond ground idle),
+    // inhibit auto-disarm (current spool state may lag during delays/checks).
+    if (motors->get_desired_spool_state() > AP_Motors::DesiredSpoolState::GROUND_IDLE
+        || motors->get_spool_state() > AP_Motors::SpoolState::GROUND_IDLE) {
         auto_disarm_begin = tnow_ms;
         return;
     }
 
-    // always allow auto disarm if using interlock switch or motors are Emergency Stopped
+    // If throttle interlock is used and disengaged, or Emergency Stop is active,
+    // shorten the auto-disarm delay (motors may be stopped so arming is less obvious)
     if ((ap.using_interlock && !motors->get_interlock()) || SRV_Channels::get_emergency_stop()) {
 #if FRAME_CONFIG != HELI_FRAME
-        // use a shorter delay if using throttle interlock switch or Emergency Stop, because it is less
-        // obvious the copter is armed as the motors will not be spinning
+        // Shorten delay when motors may be stopped (interlock off / e-stop), since arming is less obvious.
         disarm_delay_ms /= 2;
 #endif
     } else {
@@ -117,189 +45,23 @@ void Copter::auto_disarm_check()
         }
 
         if (!thr_low || !ap.land_complete) {
-            // reset timer
+            // Reset timer whenever throttle is not low or vehicle is not landed.
             auto_disarm_begin = tnow_ms;
         }
     }
 
     // disarm once timer expires
     if ((tnow_ms-auto_disarm_begin) >= disarm_delay_ms) {
-        init_disarm_motors();
+        arming.disarm(AP_Arming::Method::DISARMDELAY);
         auto_disarm_begin = tnow_ms;
     }
 }
 
-// init_arm_motors - performs arming process including initialisation of barometer and gyros
-//  returns false if arming failed because of pre-arm checks, arming checks or a gyro calibration failure
-bool Copter::init_arm_motors(const AP_Arming::Method method, const bool do_arming_checks)
-{
-    static bool in_arm_motors = false;
-
-    // exit immediately if already in this function
-    if (in_arm_motors) {
-        return false;
-    }
-    in_arm_motors = true;
-
-    // return true if already armed
-    if (motors->armed()) {
-        in_arm_motors = false;
-        return true;
-    }
-
-    // run pre-arm-checks and display failures
-    if (do_arming_checks && !arming.all_checks_passing(method)) {
-        AP_Notify::events.arming_failed = true;
-        in_arm_motors = false;
-        return false;
-    }
-
-    // let logger know that we're armed (it may open logs e.g.)
-    AP::logger().set_vehicle_armed(true);
-
-    // disable cpu failsafe because initialising everything takes a while
-    failsafe_disable();
-
-    // notify that arming will occur (we do this early to give plenty of warning)
-    AP_Notify::flags.armed = true;
-    // call notify update a few times to ensure the message gets out
-    for (uint8_t i=0; i<=10; i++) {
-        notify.update();
-    }
-
-#if HIL_MODE != HIL_MODE_DISABLED || CONFIG_HAL_BOARD == HAL_BOARD_SITL
-    gcs().send_text(MAV_SEVERITY_INFO, "Arming motors");
-#endif
-
-    // Remember Orientation
-    // --------------------
-    init_simple_bearing();
-
-    initial_armed_bearing = ahrs.yaw_sensor;
-
-    if (!ahrs.home_is_set()) {
-        // Reset EKF altitude if home hasn't been set yet (we use EKF altitude as substitute for alt above home)
-        ahrs.resetHeightDatum();
-        Log_Write_Event(DATA_EKF_ALT_RESET);
-
-        // we have reset height, so arming height is zero
-        arming_altitude_m = 0;        
-    } else if (!ahrs.home_is_locked()) {
-        // Reset home position if it has already been set before (but not locked)
-        if (!set_home_to_current_location(false)) {
-            // ignore failure
-        }
-
-        // remember the height when we armed
-        arming_altitude_m = inertial_nav.get_altitude() * 0.01;
-    }
-    update_super_simple_bearing(false);
-
-    // Reset SmartRTL return location. If activated, SmartRTL will ultimately try to land at this point
-#if MODE_SMARTRTL_ENABLED == ENABLED
-    g2.smart_rtl.set_home(position_ok());
-#endif
-
-    // enable gps velocity based centrefugal force compensation
-    ahrs.set_correct_centrifugal(true);
-    hal.util->set_soft_armed(true);
-
-#if SPRAYER_ENABLED == ENABLED
-    // turn off sprayer's test if on
-    sprayer.test_pump(false);
-#endif
-
-    // enable output to motors
-    enable_motor_output();
-
-    // finally actually arm the motors
-    motors->armed(true);
-
-    Log_Write_Event(DATA_ARMED);
-
-    // log flight mode in case it was changed while vehicle was disarmed
-    logger.Write_Mode(control_mode, control_mode_reason);
-
-    // re-enable failsafe
-    failsafe_enable();
-
-    // perf monitor ignores delay due to arming
-    scheduler.perf_info.ignore_this_loop();
-
-    // flag exiting this function
-    in_arm_motors = false;
-
-    // Log time stamp of arming event
-    arm_time_ms = millis();
-
-    // Start the arming delay
-    ap.in_arming_delay = true;
-
-    // assumed armed without a arming, switch. Overridden in switches.cpp
-    ap.armed_with_switch = false;
-    
-    // return success
-    return true;
-}
-
-// init_disarm_motors - disarm motors
-void Copter::init_disarm_motors()
-{
-    // return immediately if we are already disarmed
-    if (!motors->armed()) {
-        return;
-    }
-
-#if HIL_MODE != HIL_MODE_DISABLED || CONFIG_HAL_BOARD == HAL_BOARD_SITL
-    gcs().send_text(MAV_SEVERITY_INFO, "Disarming motors");
-#endif
-
-    // save compass offsets learned by the EKF if enabled
-    if (ahrs.use_compass() && compass.get_learn_type() == Compass::LEARN_EKF) {
-        for(uint8_t i=0; i<COMPASS_MAX_INSTANCES; i++) {
-            Vector3f magOffsets;
-            if (ahrs.getMagOffsets(i, magOffsets)) {
-                compass.set_and_save_offsets(i, magOffsets);
-            }
-        }
-    }
-
-#if AUTOTUNE_ENABLED == ENABLED
-    // save auto tuned parameters
-    if (control_mode == AUTOTUNE) {;
-        mode_autotune.save_tuning_gains();
-    } else {
-        mode_autotune.reset();
-    }
-#endif
-
-    // we are not in the air
-    set_land_complete(true);
-    set_land_complete_maybe(true);
-
-    Log_Write_Event(DATA_DISARMED);
-
-    // send disarm command to motors
-    motors->armed(false);
-
-#if MODE_AUTO_ENABLED == ENABLED
-    // reset the mission
-    mode_auto.mission.reset();
-#endif
-
-    AP::logger().set_vehicle_armed(false);
-
-    // disable gps velocity based centrefugal force compensation
-    ahrs.set_correct_centrifugal(false);
-    hal.util->set_soft_armed(false);
-
-    ap.in_arming_delay = false;
-}
-
 // motors_output - send output to motors library which will adjust and send to ESCs and servos
-void Copter::motors_output()
+// full_push is true when slower rate updates (e.g. servo output) need to be performed at the main loop rate.
+void Copter::motors_output(bool full_push)
 {
-#if ADVANCED_FAILSAFE == ENABLED
+#if AP_COPTER_ADVANCED_FAILSAFE_ENABLED
     // this is to allow the failsafe module to deliberately crash
     // the vehicle. Only used in extreme circumstances to meet the
     // OBC rules
@@ -313,38 +75,57 @@ void Copter::motors_output()
 #endif
 
     // Update arming delay state
-    if (ap.in_arming_delay && (!motors->armed() || millis()-arm_time_ms > ARMING_DELAY_SEC*1.0e3f || control_mode == THROW)) {
+    if (ap.in_arming_delay && (!motors->armed() || millis()-arm_time_ms > ARMING_DELAY_SEC*1.0e3f || flightmode->mode_number() == Mode::Number::THROW)) {
         ap.in_arming_delay = false;
     }
 
     // output any servo channels
     SRV_Channels::calc_pwm();
 
+    auto &srv = AP::srv();
+
     // cork now, so that all channel outputs happen at once
-    SRV_Channels::cork();
+    srv.cork();
 
     // update output on any aux channels, for manual passthru
     SRV_Channels::output_ch_all();
 
-    // check if we are performing the motor test
-    if (ap.motor_test) {
-        motor_test_output();
-    } else {
-        bool interlock = motors->armed() && !ap.in_arming_delay && (!ap.using_interlock || ap.motor_interlock_switch) && !SRV_Channels::get_emergency_stop();
-        if (!motors->get_interlock() && interlock) {
-            motors->set_interlock(true);
-            Log_Write_Event(DATA_MOTORS_INTERLOCK_ENABLED);
-        } else if (motors->get_interlock() && !interlock) {
-            motors->set_interlock(false);
-            Log_Write_Event(DATA_MOTORS_INTERLOCK_DISABLED);
-        }
+    // update motors interlock state
+    bool interlock = motors->armed() && !ap.in_arming_delay && (!ap.using_interlock || ap.motor_interlock_switch) && !SRV_Channels::get_emergency_stop();
+    if (!motors->get_interlock() && interlock) {
+        motors->set_interlock(true);
+        LOGGER_WRITE_EVENT(LogEvent::MOTORS_INTERLOCK_ENABLED);
+    } else if (motors->get_interlock() && !interlock) {
+        motors->set_interlock(false);
+        LOGGER_WRITE_EVENT(LogEvent::MOTORS_INTERLOCK_DISABLED);
+    }
 
+    if (ap.motor_test) {
+        // check if we are performing the motor test
+        motor_test_output();
+    } else if (ap.compass_mot) {
+        compassmot_output();
+    } else {
         // send output signals to motors
-        motors->output();
+        flightmode->output_to_motors();
     }
 
     // push all channels
-    SRV_Channels::push();
+    if (full_push) {
+        // motor output including servos and other updates that need to run at the main loop rate
+        srv.push();
+    } else {
+        // motor output only at main loop rate or faster
+        hal.rcout->push();
+    }
+}
+
+// motors_output from main thread at main loop rate
+void Copter::motors_output_main()
+{
+    if (!using_rate_thread) {
+        motors_output();
+    }
 }
 
 // check for pilot stick input to trigger lost vehicle alarm
